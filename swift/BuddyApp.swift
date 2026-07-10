@@ -85,6 +85,7 @@ final class BuddyView: NSView {
     var notifyUntil: Double = 0
     var phase: CGFloat = 0
     var revealProgress: CGFloat = 0
+    var revealVelocity: CGFloat = 0
     var scale: CGFloat = 1.0
     var tilt: CGFloat = 0
 
@@ -118,6 +119,10 @@ final class BuddyView: NSView {
     override func mouseEntered(with event: NSEvent) { hovered = true }
     override func mouseExited(with event: NSEvent) { hovered = false }
 
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
     override func mouseDown(with event: NSEvent) {
         dragging = false
         dragStartMouse = NSEvent.mouseLocation
@@ -140,6 +145,7 @@ final class BuddyView: NSView {
             runScript(awake ? "\(binDir)/killawake" : "\(binDir)/stayawake")
             awake.toggle()
             needsDisplay = true
+            (NSApp.delegate as? AppDelegate)?.updateStatusIcon()
         }
         dragging = false
     }
@@ -157,9 +163,18 @@ final class BuddyView: NSView {
     func compositeHeight() -> CGFloat { baseHeight * scale }
     func compositeWidth() -> CGFloat { baseWidth * scale }
 
+    func batShadow() -> NSShadow {
+        let s = NSShadow()
+        s.shadowBlurRadius = 6
+        s.shadowOffset = NSSize(width: 0, height: -3)
+        s.shadowColor = NSColor.black.withAlphaComponent(0.35)
+        return s
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.set()
         dirtyRect.fill()
+        NSGraphicsContext.current?.imageInterpolation = .high
 
         let ctx = NSGraphicsContext.current?.cgContext
         ctx?.saveGState()
@@ -184,8 +199,11 @@ final class BuddyView: NSView {
 
         // branch: fixed, never bobs, never changes with awake/asleep
         if let branch = branchImage {
+            ctx?.saveGState()
+            batShadow().set()
             let r = NSRect(x: -w / 2, y: bodyH / 2, width: w, height: branchH)
             branch.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
+            ctx?.restoreGState()
         }
 
         // body: swaps art, subtle bob only (ears wiggle independently, see below)
@@ -198,7 +216,10 @@ final class BuddyView: NSView {
             let aspect = body.size.width / body.size.height
             let bw = bodyH * aspect
             bodyRect = NSRect(x: -bw / 2, y: -bodyH / 2, width: bw, height: bodyH)
+            ctx?.saveGState()
+            batShadow().set()
             body.draw(in: bodyRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            ctx?.restoreGState()
 
             if awake {
                 drawBlink(in: bodyRect)
@@ -234,9 +255,10 @@ final class BuddyView: NSView {
         ctx?.restoreGState()
 
         if !awake && revealProgress > 0.4 {
+            let zAlpha = max(0, min(1, revealProgress))
             let zAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.boldSystemFont(ofSize: 12),
-                .foregroundColor: NSColor(calibratedRed: 0.6, green: 0.64, blue: 0.7, alpha: 1.0),
+                .foregroundColor: NSColor(calibratedRed: 0.6, green: 0.64, blue: 0.7, alpha: zAlpha),
             ]
             let drift = CGFloat((sin(phase) + 1) / 2) * 8
             ("z Z z" as NSString).draw(at: NSPoint(x: bodyRect.maxX - 10, y: bodyRect.maxY - 10 + drift), withAttributes: zAttrs)
@@ -267,12 +289,18 @@ final class BuddyView: NSView {
     }
 
     func drawBubble(_ msg: String) {
+        // fade out over the last ~0.9s of the 8s display window, and track reveal
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        let remaining = (messageTime + 8000) - nowMs
+        let alpha = max(0, min(1, remaining / 900)) * max(0, min(1, revealProgress))
+        guard alpha > 0.01 else { return }
+
         let bubbleW: CGFloat = bounds.width * 0.92
         let style = NSMutableParagraphStyle()
         style.alignment = .center
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(alpha),
             .paragraphStyle: style,
         ]
         let textW = bubbleW - 16
@@ -283,8 +311,13 @@ final class BuddyView: NSView {
         let bubbleH = min(90, max(28, bounding.height + 14))
         let bubbleRect = NSRect(x: (bounds.width - bubbleW) / 2, y: 2, width: bubbleW, height: bubbleH)
 
-        let path = NSBezierPath(roundedRect: bubbleRect, xRadius: 8, yRadius: 8)
-        NSColor(calibratedWhite: 0.12, alpha: 0.92).setFill()
+        let path = NSBezierPath(roundedRect: bubbleRect, xRadius: 10, yRadius: 10)
+        // little tail pointing up toward the bat
+        path.move(to: NSPoint(x: bubbleRect.midX - 7, y: bubbleRect.maxY))
+        path.line(to: NSPoint(x: bubbleRect.midX, y: bubbleRect.maxY + 7))
+        path.line(to: NSPoint(x: bubbleRect.midX + 7, y: bubbleRect.maxY))
+        path.close()
+        NSColor(calibratedWhite: 0.1, alpha: 0.93 * alpha).setFill()
         path.fill()
         (msg as NSString).draw(in: bubbleRect.insetBy(dx: 8, dy: 7), withAttributes: attrs)
     }
@@ -292,6 +325,11 @@ final class BuddyView: NSView {
 
 func buildBuddyMenu() -> NSMenu {
     let menu = NSMenu()
+    let awake = (NSApp.delegate as? AppDelegate)?.panel.buddyView.awake ?? false
+    let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(AppDelegate.toggleAwake), keyEquivalent: "")
+    toggleItem.state = awake ? .on : .off
+    menu.addItem(toggleItem)
+    menu.addItem(NSMenuItem.separator())
     menu.addItem(withTitle: "Hide Wigbat", action: #selector(AppDelegate.hideBuddy), keyEquivalent: "")
     menu.addItem(NSMenuItem.separator())
     menu.addItem(withTitle: "Bigger", action: #selector(AppDelegate.biggerBuddy), keyEquivalent: "")
@@ -369,7 +407,8 @@ final class BuddyPanel: NSPanel {
     }
 
     func applyScale(_ delta: CGFloat) {
-        prefs.scale = max(0.5, min(2.0, prefs.scale + delta))
+        // capped at 1.5 so the art never clips the fixed hover window
+        prefs.scale = max(0.5, min(1.5, prefs.scale + delta))
         prefs.save()
         buddyView.scale = prefs.scale
         buddyView.needsDisplay = true
@@ -392,28 +431,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pollTimer: Timer!
     var menuIconAwake: NSImage?
     var menuIconAsleep: NSImage?
+    var statusToggleItem: NSMenuItem?
     var lastSeenMessageTime: Double = 0
+    var pollTick = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         panel = BuddyPanel()
         setupStatusItem()
 
-        renderTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        renderTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let v = self.panel.buddyView
-            v.phase += 0.06
             let nowMs = Date().timeIntervalSince1970 * 1000
             let target: CGFloat = (v.hovered || nowMs < v.notifyUntil) ? 1.0 : 0.0
-            v.revealProgress += (target - v.revealProgress) * 0.25
-            if abs(v.revealProgress - target) < 0.01 { v.revealProgress = target }
+
+            // fully tucked away and idle — skip redraws entirely (zero CPU)
+            if target == 0 && v.revealProgress == 0 && v.revealVelocity == 0 { return }
+
+            v.phase += 0.03
+            // slightly underdamped spring: settles fast with a small playful bounce
+            v.revealVelocity = v.revealVelocity * 0.74 + (target - v.revealProgress) * 0.16
+            v.revealProgress += v.revealVelocity
+            v.revealProgress = min(1.12, max(-0.02, v.revealProgress))
+            if abs(v.revealProgress - target) < 0.001 && abs(v.revealVelocity) < 0.001 {
+                v.revealProgress = target
+                v.revealVelocity = 0
+            }
             v.needsDisplay = true
         }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            self.pollTick += 1
             var s = readState()
-            if s.awake && !anyClaudeSessionRunning() {
+            if s.awake && self.pollTick % 3 == 0 && !anyClaudeSessionRunning() {
                 // a session was likely force-killed and SessionEnd never fired —
                 // self-heal instead of staying awake forever.
                 runScript("\(binDir)/killawake")
@@ -442,8 +494,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
-        let toggleItem = NSMenuItem(title: "Keep Awake (Wigbat Active)", action: #selector(toggleAwake), keyEquivalent: "")
+        let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleAwake), keyEquivalent: "")
         toggleItem.target = self
+        statusToggleItem = toggleItem
         menu.addItem(toggleItem)
         menu.addItem(NSMenuItem.separator())
         let showHideItem = NSMenuItem(title: "Show/Hide Buddy", action: #selector(toggleShowHide), keyEquivalent: "")
@@ -461,12 +514,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateStatusIcon() {
         statusItem.button?.image = panel.buddyView.awake ? menuIconAwake : menuIconAsleep
+        statusToggleItem?.state = panel.buddyView.awake ? .on : .off
     }
 
     @objc func toggleAwake() {
         let awake = panel.buddyView.awake
         runScript(awake ? "\(binDir)/killawake" : "\(binDir)/stayawake")
         panel.buddyView.awake.toggle()
+        panel.buddyView.needsDisplay = true
+        updateStatusIcon()
     }
 
     @objc func toggleShowHide() {
