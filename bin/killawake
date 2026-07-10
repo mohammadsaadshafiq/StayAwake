@@ -1,0 +1,16 @@
+#!/bin/zsh
+# killawake — stop all keep-awake, tell the widget it's asleep, let the Mac sleep normally again.
+STATE_DIR="$HOME/claude-awake-buddy/state"
+mkdir -p "$STATE_DIR"
+
+pkill caffeinate 2>/dev/null
+KILLED=$?
+
+echo "{\"awake\":false,\"updated\":$(date +%s)}" > "$STATE_DIR/state.json"
+echo 0 > "$STATE_DIR/session-count"
+
+if [ "$KILLED" -eq 0 ]; then
+  echo "😴 KILLED all keep-awake — Mac can sleep normally now."
+else
+  echo "😴 Nothing running — keep-awake was already off."
+fi

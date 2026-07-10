@@ -1,0 +1,14 @@
+#!/bin/zsh
+# stayawake — keep this Mac awake and tell the widget it's awake.
+# -d display  -i idle  -m disk  -s system  -u user-active
+STATE_DIR="$HOME/claude-awake-buddy/state"
+mkdir -p "$STATE_DIR"
+
+pkill caffeinate 2>/dev/null          # clear any previous keep-awake (no stacking)
+nohup caffeinate -dimsu >/dev/null 2>&1 &   # detached, survives closing the terminal
+disown 2>/dev/null
+
+echo "{\"awake\":true,\"updated\":$(date +%s)}" > "$STATE_DIR/state.json"
+
+echo "☕ STAY AWAKE is ON — this Mac will not sleep."
+echo "   (stop it anytime with:  killawake )"
