@@ -12,6 +12,7 @@ struct Prefs {
     var posYFrac: CGFloat = 1.0   // 1.0 = flush to top (default, near the camera)
     var scale: CGFloat = 1.0
     var tilt: CGFloat = 0       // rotation in degrees; user-adjustable via the menu
+    var keepDisplayOn = true    // false = screen may sleep while the Mac stays awake
 
     static func load() -> Prefs {
         var p = Prefs()
@@ -21,12 +22,13 @@ struct Prefs {
             if let y = json["posYFrac"] as? NSNumber { p.posYFrac = CGFloat(y.doubleValue) }
             if let s = json["scale"] as? NSNumber { p.scale = CGFloat(s.doubleValue) }
             if let t = json["tilt"] as? NSNumber { p.tilt = CGFloat(t.doubleValue) }
+            if let k = json["keepDisplayOn"] as? Bool { p.keepDisplayOn = k }
         }
         return p
     }
 
     func save() {
-        let json: [String: Any] = ["posXFrac": posXFrac, "posYFrac": posYFrac, "scale": scale, "tilt": tilt]
+        let json: [String: Any] = ["posXFrac": posXFrac, "posYFrac": posYFrac, "scale": scale, "tilt": tilt, "keepDisplayOn": keepDisplayOn]
         if let data = try? JSONSerialization.data(withJSONObject: json) {
             try? data.write(to: URL(fileURLWithPath: prefsPath))
         }
@@ -55,20 +57,41 @@ func anyClaudeSessionRunning() -> Bool {
     }
 }
 
-func readState() -> (awake: Bool, message: String?, messageTime: Double) {
+func readState() -> (awake: Bool, message: String?, messageTime: Double, since: Double) {
     var awake = false
     var message: String? = nil
     var messageTime: Double = 0
+    var since: Double = 0
     if let data = FileManager.default.contents(atPath: "\(stateDir)/state.json"),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         awake = (json["awake"] as? Bool) ?? false
+        if let u = json["updated"] as? NSNumber { since = u.doubleValue }
     }
     if let data = FileManager.default.contents(atPath: "\(stateDir)/message.json"),
        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         message = json["message"] as? String
         if let t = json["time"] as? NSNumber { messageTime = t.doubleValue }
     }
-    return (awake, message, messageTime)
+    return (awake, message, messageTime, since)
+}
+
+func claudeSessionCount() -> Int {
+    let task = Process()
+    let pipe = Pipe()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    task.arguments = ["-x", "claude"]
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do {
+        try task.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return 0 }
+        let out = String(data: data, encoding: .utf8) ?? ""
+        return out.split(separator: "\n").count
+    } catch {
+        return 0
+    }
 }
 
 func loadImage(_ name: String) -> NSImage? {
@@ -253,18 +276,26 @@ final class BuddyView: NSView {
             }
         }
         ctx?.restoreGState()
+        ctx?.restoreGState()
 
+        // zzz: drawn in plain view coordinates (outside the mirrored/rotated
+        // transform, so the glyphs read correctly), floating up beside the head
         if !awake && revealProgress > 0.4 {
             let zAlpha = max(0, min(1, revealProgress))
-            let zAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.boldSystemFont(ofSize: 12),
-                .foregroundColor: NSColor(calibratedRed: 0.6, green: 0.64, blue: 0.7, alpha: zAlpha),
-            ]
-            let drift = CGFloat((sin(phase) + 1) / 2) * 8
-            ("z Z z" as NSString).draw(at: NSPoint(x: bodyRect.maxX - 10, y: bodyRect.maxY - 10 + drift), withAttributes: zAttrs)
+            let drift = CGFloat((sin(phase) + 1) / 2) * 10
+            let centerY = restY + localShift
+            let zx = bounds.width / 2 + compositeWidth() * 0.42
+            let zy = centerY - compositeHeight() * 0.18 + drift
+            let sizes: [CGFloat] = [11, 15, 11]
+            let offsets: [(CGFloat, CGFloat)] = [(0, 0), (14, 14), (30, 26)]
+            for (i, glyph) in ["z", "Z", "z"].enumerated() {
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.boldSystemFont(ofSize: sizes[i]),
+                    .foregroundColor: NSColor(calibratedRed: 0.62, green: 0.66, blue: 0.76, alpha: zAlpha * (1 - CGFloat(i) * 0.2)),
+                ]
+                (glyph as NSString).draw(at: NSPoint(x: zx + offsets[i].0, y: zy + offsets[i].1), withAttributes: attrs)
+            }
         }
-
-        ctx?.restoreGState()
 
         let showBubble = message != nil && messageTime > 0 && (Date().timeIntervalSince1970 * 1000 - messageTime) < 8000
         if showBubble, revealProgress > 0.6, let msg = message {
@@ -325,10 +356,20 @@ final class BuddyView: NSView {
 
 func buildBuddyMenu() -> NSMenu {
     let menu = NSMenu()
-    let awake = (NSApp.delegate as? AppDelegate)?.panel.buddyView.awake ?? false
+    let delegate = NSApp.delegate as? AppDelegate
+    let awake = delegate?.panel.buddyView.awake ?? false
+
+    let infoItem = NSMenuItem(title: delegate?.infoLine() ?? "", action: nil, keyEquivalent: "")
+    infoItem.isEnabled = false
+    menu.addItem(infoItem)
+    menu.addItem(NSMenuItem.separator())
+
     let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(AppDelegate.toggleAwake), keyEquivalent: "")
     toggleItem.state = awake ? .on : .off
     menu.addItem(toggleItem)
+    let displayItem = NSMenuItem(title: "Keep Display On", action: #selector(AppDelegate.toggleKeepDisplayOn), keyEquivalent: "")
+    displayItem.state = (delegate?.panel.prefs.keepDisplayOn ?? true) ? .on : .off
+    menu.addItem(displayItem)
     menu.addItem(NSMenuItem.separator())
     menu.addItem(withTitle: "Hide Wigbat", action: #selector(AppDelegate.hideBuddy), keyEquivalent: "")
     menu.addItem(NSMenuItem.separator())
@@ -432,8 +473,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var menuIconAwake: NSImage?
     var menuIconAsleep: NSImage?
     var statusToggleItem: NSMenuItem?
+    var statusDisplayItem: NSMenuItem?
+    var statusInfoItem: NSMenuItem?
     var lastSeenMessageTime: Double = 0
     var pollTick = 0
+    var sessionCount = 0
+    var awakeSince: Double = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -465,12 +510,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             self.pollTick += 1
             var s = readState()
-            if s.awake && self.pollTick % 3 == 0 && !anyClaudeSessionRunning() {
+            if self.pollTick % 3 == 1 {
+                self.sessionCount = claudeSessionCount()
+            }
+            if s.awake && self.pollTick % 3 == 0 && self.sessionCount == 0 && !anyClaudeSessionRunning() {
                 // a session was likely force-killed and SessionEnd never fired —
                 // self-heal instead of staying awake forever.
                 runScript("\(binDir)/killawake")
                 s.awake = false
             }
+            self.awakeSince = s.since
             self.panel.buddyView.awake = s.awake
             self.panel.buddyView.message = s.message
             self.panel.buddyView.messageTime = s.messageTime
@@ -494,10 +543,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.imagePosition = .imageOnly
 
         let menu = NSMenu()
+        let infoItem = NSMenuItem(title: "No Claude sessions", action: nil, keyEquivalent: "")
+        infoItem.isEnabled = false
+        statusInfoItem = infoItem
+        menu.addItem(infoItem)
+        menu.addItem(NSMenuItem.separator())
         let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleAwake), keyEquivalent: "")
         toggleItem.target = self
         statusToggleItem = toggleItem
         menu.addItem(toggleItem)
+        let displayItem = NSMenuItem(title: "Keep Display On", action: #selector(toggleKeepDisplayOn), keyEquivalent: "")
+        displayItem.target = self
+        statusDisplayItem = displayItem
+        menu.addItem(displayItem)
         menu.addItem(NSMenuItem.separator())
         let showHideItem = NSMenuItem(title: "Show/Hide Buddy", action: #selector(toggleShowHide), keyEquivalent: "")
         showHideItem.target = self
@@ -512,9 +570,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    func infoLine() -> String {
+        var line = sessionCount == 0 ? "No Claude sessions"
+                 : sessionCount == 1 ? "1 Claude session active"
+                 : "\(sessionCount) Claude sessions active"
+        if panel.buddyView.awake && awakeSince > 0 {
+            let mins = Int(Date().timeIntervalSince1970 - awakeSince) / 60
+            let dur = mins >= 60 ? "\(mins / 60)h \(mins % 60)m" : "\(mins)m"
+            line += " · awake \(dur)"
+        }
+        return line
+    }
+
     func updateStatusIcon() {
         statusItem.button?.image = panel.buddyView.awake ? menuIconAwake : menuIconAsleep
         statusToggleItem?.state = panel.buddyView.awake ? .on : .off
+        statusDisplayItem?.state = panel.prefs.keepDisplayOn ? .on : .off
+        statusInfoItem?.title = infoLine()
     }
 
     @objc func toggleAwake() {
@@ -522,6 +594,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runScript(awake ? "\(binDir)/killawake" : "\(binDir)/stayawake")
         panel.buddyView.awake.toggle()
         panel.buddyView.needsDisplay = true
+        updateStatusIcon()
+    }
+
+    @objc func toggleKeepDisplayOn() {
+        panel.prefs.keepDisplayOn.toggle()
+        panel.prefs.save()
+        if panel.buddyView.awake {
+            // re-run stayawake so caffeinate picks up the new display flag
+            runScript("\(binDir)/stayawake")
+        }
         updateStatusIcon()
     }
 

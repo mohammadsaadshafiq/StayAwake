@@ -4,8 +4,17 @@
 STATE_DIR="$HOME/claude-awake-buddy/state"
 mkdir -p "$STATE_DIR"
 
+# honor the "Keep Display On" preference from the Wigbat menu: when off,
+# the screen may sleep while the Mac itself stays awake (kinder to battery)
+FLAGS="-dimsu"
+PREFS="$STATE_DIR/prefs.json"
+if [ -f "$PREFS" ] && command -v jq >/dev/null 2>&1; then
+  KEEP_DISPLAY=$(jq -r 'if has("keepDisplayOn") then .keepDisplayOn else true end' "$PREFS" 2>/dev/null)
+  [ "$KEEP_DISPLAY" = "false" ] && FLAGS="-imsu"
+fi
+
 pkill caffeinate 2>/dev/null          # clear any previous keep-awake (no stacking)
-nohup caffeinate -dimsu >/dev/null 2>&1 &   # detached, survives closing the terminal
+nohup caffeinate $FLAGS >/dev/null 2>&1 &   # detached, survives closing the terminal
 disown 2>/dev/null
 
 echo "{\"awake\":true,\"updated\":$(date +%s)}" > "$STATE_DIR/state.json"
