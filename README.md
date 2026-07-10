@@ -30,14 +30,19 @@ awake while Claude Code is working, and lets it sleep the moment you're done
   in your way.
 - **Menu bar icon** (🦇 awake / 💤 asleep) as a second, always-reachable
   control surface, independent of the floating bat.
+- **Live status in every menu** — how many Claude sessions are running and
+  how long the Mac has been kept awake.
+- **Battery-friendly option** — "Keep Display On" toggle: turn it off and
+  the screen is allowed to sleep while the Mac itself stays awake for
+  Claude (`caffeinate -imsu` instead of `-dimsu`).
 
 ## Controls
 
 - **Left-click** the bat — toggle keep-awake manually
 - **Drag** the bat — move it anywhere on screen
-- **Right-click** the bat — menu: Hide, Bigger/Smaller, Rotate Left/Right,
-  Reset Position, Help, Quit
-- **Menu bar icon** — Keep Awake toggle, Show/Hide, Help, Quit
+- **Right-click** the bat — menu: Keep Mac Awake ✓, Keep Display On ✓,
+  Hide, Bigger/Smaller, Rotate Left/Right, Reset Position, Help, Quit
+- **Menu bar icon** — same toggles plus Show/Hide, Help, Quit
 
 ## How it's built
 
