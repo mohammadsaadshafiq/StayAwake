@@ -24,10 +24,18 @@ awake while Claude Code is working, and lets it sleep the moment you're done
 - **One click to override.** Left-click the bat any time to manually force
   the Mac awake or let it sleep, regardless of what Claude Code is doing.
 - **Pops up for permission prompts.** When Claude Code needs your attention
-  (the `Notification` hook), the bat reveals itself on its own and shows the
-  message in a speech bubble for a few seconds, then tucks away again.
-- **Drag it anywhere.** Free-hand positioning — drop it wherever it's least
-  in your way.
+  (the `Notification` hook), the bat springs out with an excited shake, plays
+  a soft chirp (toggleable), and shows the message in a speech bubble for
+  15 seconds. Click the bubble to dismiss it early.
+- **Sleep-safety timer.** Optional hard cap (2/4/8 hours) on how long
+  keep-awake can run, no matter what sessions or hooks are doing — so a
+  runaway session can't drain your battery overnight. The menu shows a
+  live "auto-sleep in …" countdown, and the bat tells you when it fires.
+- **Recent messages.** Both menus keep the last few Claude notifications
+  with timestamps, so a missed bubble isn't gone forever.
+- **Drag it anywhere — on any display.** Free-hand positioning; the bat
+  remembers which screen you dropped it on and stays there across
+  monitor plug/unplug (falling back to the main display).
 - **Menu bar icon** (🦇 awake / 💤 asleep) as a second, always-reachable
   control surface, independent of the floating bat.
 - **Live status in every menu** — how many Claude sessions are running and
@@ -39,10 +47,12 @@ awake while Claude Code is working, and lets it sleep the moment you're done
 ## Controls
 
 - **Left-click** the bat — toggle keep-awake manually
-- **Drag** the bat — move it anywhere on screen
+- **Click** the speech bubble — dismiss it
+- **Drag** the bat — move it anywhere, on any display
 - **Right-click** the bat — menu: Keep Mac Awake ✓, Keep Display On ✓,
+  Sleep-Safety Timer ▸, Chirp on Notifications ✓, Recent Messages ▸,
   Hide, Bigger/Smaller, Rotate Left/Right, Reset Position, Help, Quit
-- **Menu bar icon** — same toggles plus Show/Hide, Help, Quit
+- **Menu bar icon** — same menu, plus Show/Hide Buddy
 
 ## Opening & relaunching it
 

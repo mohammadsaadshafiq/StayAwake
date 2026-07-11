@@ -13,6 +13,9 @@ struct Prefs {
     var scale: CGFloat = 1.0
     var tilt: CGFloat = 0       // rotation in degrees; user-adjustable via the menu
     var keepDisplayOn = true    // false = screen may sleep while the Mac stays awake
+    var maxAwakeHours: Double = 0  // sleep-safety timer; 0 = no limit
+    var chirp = true            // play a soft sound when Claude needs attention
+    var displayID: UInt32 = 0   // which display the bat lives on; 0 = main
 
     static func load() -> Prefs {
         var p = Prefs()
@@ -23,12 +26,17 @@ struct Prefs {
             if let s = json["scale"] as? NSNumber { p.scale = CGFloat(s.doubleValue) }
             if let t = json["tilt"] as? NSNumber { p.tilt = CGFloat(t.doubleValue) }
             if let k = json["keepDisplayOn"] as? Bool { p.keepDisplayOn = k }
+            if let m = json["maxAwakeHours"] as? NSNumber { p.maxAwakeHours = m.doubleValue }
+            if let c = json["chirp"] as? Bool { p.chirp = c }
+            if let d = json["displayID"] as? NSNumber { p.displayID = d.uint32Value }
         }
         return p
     }
 
     func save() {
-        let json: [String: Any] = ["posXFrac": posXFrac, "posYFrac": posYFrac, "scale": scale, "tilt": tilt, "keepDisplayOn": keepDisplayOn]
+        let json: [String: Any] = ["posXFrac": posXFrac, "posYFrac": posYFrac, "scale": scale, "tilt": tilt,
+                                   "keepDisplayOn": keepDisplayOn, "maxAwakeHours": maxAwakeHours,
+                                   "chirp": chirp, "displayID": displayID]
         if let data = try? JSONSerialization.data(withJSONObject: json) {
             try? data.write(to: URL(fileURLWithPath: prefsPath))
         }
@@ -75,6 +83,15 @@ func readState() -> (awake: Bool, message: String?, messageTime: Double, since: 
     return (awake, message, messageTime, since)
 }
 
+// Post a message into the same pipeline the Notification hook uses, so
+// app-generated notices (e.g. the sleep-safety timer) chirp and bubble too.
+func postLocalMessage(_ text: String) {
+    let json: [String: Any] = ["message": text, "time": Date().timeIntervalSince1970 * 1000]
+    if let data = try? JSONSerialization.data(withJSONObject: json) {
+        try? data.write(to: URL(fileURLWithPath: "\(stateDir)/message.json"))
+    }
+}
+
 func claudeSessionCount() -> Int {
     let task = Process()
     let pipe = Pipe()
@@ -106,6 +123,10 @@ final class BuddyView: NSView {
     var message: String? = nil
     var messageTime: Double = 0
     var notifyUntil: Double = 0
+    let bubbleLifeMs: Double = 15000  // how long a message bubble stays up
+    var dismissedMessageTime: Double = 0  // click-to-dismiss: hide bubbles up to this time
+    var exciteUntil: Double = 0       // while now < this, the bat does its excited shake
+    var bubbleRect: NSRect = .zero    // where the bubble was last drawn, for hit-testing
     var phase: CGFloat = 0
     var revealProgress: CGFloat = 0
     var revealVelocity: CGFloat = 0
@@ -161,14 +182,26 @@ final class BuddyView: NSView {
         window.setFrameOrigin(NSPoint(x: dragStartOrigin.x + dx, y: dragStartOrigin.y + dy))
     }
 
+    func bubbleShowing(_ nowMs: Double) -> Bool {
+        message != nil && messageTime > dismissedMessageTime && (nowMs - messageTime) < bubbleLifeMs
+    }
+
     override func mouseUp(with event: NSEvent) {
         if dragging {
             (window as? BuddyPanel)?.persistCurrentPosition()
         } else {
-            runScript(awake ? "\(binDir)/killawake" : "\(binDir)/stayawake")
-            awake.toggle()
-            needsDisplay = true
-            (NSApp.delegate as? AppDelegate)?.updateStatusIcon()
+            let p = convert(event.locationInWindow, from: nil)
+            let nowMs = Date().timeIntervalSince1970 * 1000
+            if bubbleShowing(nowMs), bubbleRect.insetBy(dx: -4, dy: -4).contains(p) {
+                // click on the bubble dismisses it (and lets the bat tuck away)
+                dismissedMessageTime = messageTime
+                notifyUntil = 0
+            } else {
+                runScript(awake ? "\(binDir)/killawake" : "\(binDir)/stayawake")
+                awake.toggle()
+                needsDisplay = true
+                (NSApp.delegate as? AppDelegate)?.updateStatusIcon()
+            }
         }
         dragging = false
     }
@@ -202,6 +235,12 @@ final class BuddyView: NSView {
         let ctx = NSGraphicsContext.current?.cgContext
         ctx?.saveGState()
 
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        // excited shake: right after a notification arrives the bat rocks on its
+        // branch and bobs hard for a couple seconds so the pop actually pops
+        let excited = nowMs < exciteUntil
+        let exTilt: CGFloat = excited ? sin(phase * 5) * 5 : 0
+
         // restY: where the composite's center sits when fully revealed, comfortably
         // inside the window. collapseTravel: how far it's pushed past the window's
         // edge (off-canvas, clipped) when fully collapsed, leaving only a small peek.
@@ -211,14 +250,14 @@ final class BuddyView: NSView {
         let pivot = NSPoint(x: bounds.width / 2, y: restY)
 
         ctx?.translateBy(x: pivot.x, y: pivot.y)
-        ctx?.rotate(by: tilt * .pi / 180)
+        ctx?.rotate(by: (tilt + exTilt) * .pi / 180)
         ctx?.scaleBy(x: -1, y: 1) // mirrored left-right
         ctx?.translateBy(x: 0, y: localShift) // push toward the edge (off-canvas) in local space
 
         let w = compositeWidth()
         let branchH = compositeHeight() * (70.0 / 299.0)
         let bodyH = compositeHeight() * (229.0 / 299.0)
-        let bob = hovered ? sin(phase) * 2.0 : 0
+        let bob: CGFloat = excited ? sin(phase * 3) * 3.5 : (hovered ? sin(phase) * 2.0 : 0)
 
         // branch: fixed, never bobs, never changes with awake/asleep
         if let branch = branchImage {
@@ -297,9 +336,10 @@ final class BuddyView: NSView {
             }
         }
 
-        let showBubble = message != nil && messageTime > 0 && (Date().timeIntervalSince1970 * 1000 - messageTime) < 8000
-        if showBubble, revealProgress > 0.6, let msg = message {
+        if bubbleShowing(nowMs), revealProgress > 0.6, let msg = message {
             drawBubble(msg)
+        } else {
+            bubbleRect = .zero
         }
     }
 
@@ -320,69 +360,48 @@ final class BuddyView: NSView {
     }
 
     func drawBubble(_ msg: String) {
-        // fade out over the last ~0.9s of the 8s display window, and track reveal
+        // quick fade-in on arrival, fade out over the last ~0.9s, and track reveal
         let nowMs = Date().timeIntervalSince1970 * 1000
-        let remaining = (messageTime + 8000) - nowMs
-        let alpha = max(0, min(1, remaining / 900)) * max(0, min(1, revealProgress))
+        let remaining = (messageTime + bubbleLifeMs) - nowMs
+        let fadeIn = max(0, min(1, (nowMs - messageTime) / 180))
+        let alpha = fadeIn * max(0, min(1, remaining / 900)) * max(0, min(1, revealProgress))
         guard alpha > 0.01 else { return }
 
-        let bubbleW: CGFloat = bounds.width * 0.92
+        let bubbleW: CGFloat = bounds.width * 0.95
         let style = NSMutableParagraphStyle()
         style.alignment = .center
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(alpha),
             .paragraphStyle: style,
         ]
-        let textW = bubbleW - 16
+        let textW = bubbleW - 20
         let bounding = (msg as NSString).boundingRect(
             with: NSSize(width: textW, height: 200),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: attrs)
-        let bubbleH = min(90, max(28, bounding.height + 14))
-        let bubbleRect = NSRect(x: (bounds.width - bubbleW) / 2, y: 2, width: bubbleW, height: bubbleH)
+        let bubbleH = min(100, max(30, bounding.height + 16))
+        let rect = NSRect(x: (bounds.width - bubbleW) / 2, y: 2, width: bubbleW, height: bubbleH)
+        bubbleRect = rect  // remembered for click-to-dismiss hit-testing
 
-        let path = NSBezierPath(roundedRect: bubbleRect, xRadius: 10, yRadius: 10)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 11, yRadius: 11)
         // little tail pointing up toward the bat
-        path.move(to: NSPoint(x: bubbleRect.midX - 7, y: bubbleRect.maxY))
-        path.line(to: NSPoint(x: bubbleRect.midX, y: bubbleRect.maxY + 7))
-        path.line(to: NSPoint(x: bubbleRect.midX + 7, y: bubbleRect.maxY))
+        path.move(to: NSPoint(x: rect.midX - 7, y: rect.maxY))
+        path.line(to: NSPoint(x: rect.midX, y: rect.maxY + 7))
+        path.line(to: NSPoint(x: rect.midX + 7, y: rect.maxY))
         path.close()
-        NSColor(calibratedWhite: 0.1, alpha: 0.93 * alpha).setFill()
+        NSColor(calibratedRed: 0.09, green: 0.09, blue: 0.13, alpha: 0.94 * alpha).setFill()
         path.fill()
-        (msg as NSString).draw(in: bubbleRect.insetBy(dx: 8, dy: 7), withAttributes: attrs)
+        NSColor.white.withAlphaComponent(0.18 * alpha).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        (msg as NSString).draw(in: rect.insetBy(dx: 10, dy: 8), withAttributes: attrs)
     }
 }
 
 func buildBuddyMenu() -> NSMenu {
     let menu = NSMenu()
-    let delegate = NSApp.delegate as? AppDelegate
-    let awake = delegate?.panel.buddyView.awake ?? false
-
-    let infoItem = NSMenuItem(title: delegate?.infoLine() ?? "", action: nil, keyEquivalent: "")
-    infoItem.isEnabled = false
-    menu.addItem(infoItem)
-    menu.addItem(NSMenuItem.separator())
-
-    let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(AppDelegate.toggleAwake), keyEquivalent: "")
-    toggleItem.state = awake ? .on : .off
-    menu.addItem(toggleItem)
-    let displayItem = NSMenuItem(title: "Keep Display On", action: #selector(AppDelegate.toggleKeepDisplayOn), keyEquivalent: "")
-    displayItem.state = (delegate?.panel.prefs.keepDisplayOn ?? true) ? .on : .off
-    menu.addItem(displayItem)
-    menu.addItem(NSMenuItem.separator())
-    menu.addItem(withTitle: "Hide Wigbat", action: #selector(AppDelegate.hideBuddy), keyEquivalent: "")
-    menu.addItem(NSMenuItem.separator())
-    menu.addItem(withTitle: "Bigger", action: #selector(AppDelegate.biggerBuddy), keyEquivalent: "")
-    menu.addItem(withTitle: "Smaller", action: #selector(AppDelegate.smallerBuddy), keyEquivalent: "")
-    menu.addItem(withTitle: "Rotate Left", action: #selector(AppDelegate.rotateLeft), keyEquivalent: "")
-    menu.addItem(withTitle: "Rotate Right", action: #selector(AppDelegate.rotateRight), keyEquivalent: "")
-    menu.addItem(NSMenuItem.separator())
-    menu.addItem(withTitle: "Reset Position", action: #selector(AppDelegate.resetPosition), keyEquivalent: "")
-    menu.addItem(NSMenuItem.separator())
-    menu.addItem(withTitle: "Help", action: #selector(AppDelegate.showHelp), keyEquivalent: "")
-    menu.addItem(withTitle: "Quit Wigbat", action: #selector(AppDelegate.quitApp), keyEquivalent: "")
-    for item in menu.items { item.target = NSApp.delegate }
+    (NSApp.delegate as? AppDelegate)?.populate(menu, forBuddy: true)
     return menu
 }
 
@@ -412,8 +431,18 @@ final class BuddyPanel: NSPanel {
         orderFrontRegardless()
     }
 
+    static func screenID(_ screen: NSScreen) -> UInt32 {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+
+    // the display the bat lives on — falls back to the main screen if the
+    // remembered display is unplugged
+    func targetScreen() -> NSScreen? {
+        NSScreen.screens.first { Self.screenID($0) == prefs.displayID } ?? NSScreen.main
+    }
+
     func layout() {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = targetScreen() else { return }
         let sf = screen.frame
         let size = frame.size
         let origin = NSPoint(
@@ -424,10 +453,15 @@ final class BuddyPanel: NSPanel {
     }
 
     func persistCurrentPosition() {
-        guard let screen = NSScreen.main else { return }
+        // remember whichever display the bat was dropped on, and its position
+        // as fractions of that display
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main
+        else { return }
         let sf = screen.frame
         let size = frame.size
         let o = frame.origin
+        prefs.displayID = Self.screenID(screen)
         prefs.posXFrac = max(0, min(1, (o.x - sf.minX) / max(1, sf.width - size.width)))
         prefs.posYFrac = max(0, min(1, (o.y - sf.minY) / max(1, sf.height - size.height)))
         prefs.save()
@@ -437,6 +471,7 @@ final class BuddyPanel: NSPanel {
         prefs.posXFrac = 0.5
         prefs.posYFrac = 1.0
         prefs.tilt = 0
+        prefs.displayID = 0  // back to the main display
         prefs.save()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
@@ -465,20 +500,19 @@ final class BuddyPanel: NSPanel {
 
 // MARK: - App delegate + status item
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var panel: BuddyPanel!
     var statusItem: NSStatusItem!
     var renderTimer: Timer!
     var pollTimer: Timer!
     var menuIconAwake: NSImage?
     var menuIconAsleep: NSImage?
-    var statusToggleItem: NSMenuItem?
-    var statusDisplayItem: NSMenuItem?
-    var statusInfoItem: NSMenuItem?
+    let statusMenu = NSMenu()
     var lastSeenMessageTime: Double = 0
     var pollTick = 0
     var sessionCount = 0
     var awakeSince: Double = 0
+    var history: [(time: Double, text: String)] = []  // recent Claude messages, newest last
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -519,18 +553,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 runScript("\(binDir)/killawake")
                 s.awake = false
             }
+            // sleep-safety timer: never keep the Mac awake longer than the cap,
+            // no matter what sessions or hooks are doing
+            let now = Date().timeIntervalSince1970
+            let maxH = self.panel.prefs.maxAwakeHours
+            if s.awake && maxH > 0 && s.since > 0 && now - s.since > maxH * 3600 {
+                runScript("\(binDir)/killawake")
+                s.awake = false
+                postLocalMessage("Sleep-safety timer: awake for \(Int(maxH))h — letting the Mac sleep now. Click me to keep it awake.")
+            }
             self.awakeSince = s.since
-            self.panel.buddyView.awake = s.awake
-            self.panel.buddyView.message = s.message
-            self.panel.buddyView.messageTime = s.messageTime
-            if s.messageTime > self.lastSeenMessageTime, s.message != nil {
+            let v = self.panel.buddyView
+            v.awake = s.awake
+            v.message = s.message
+            v.messageTime = s.messageTime
+            if s.messageTime > self.lastSeenMessageTime, let msg = s.message {
                 self.lastSeenMessageTime = s.messageTime
-                self.panel.buddyView.notifyUntil = s.messageTime + 6000
-                if !self.panel.isVisible { self.panel.orderFrontRegardless() }
+                self.history.append((s.messageTime, msg))
+                if self.history.count > 8 { self.history.removeFirst() }
+                // only pop for fresh messages — skip stale ones found at launch
+                if now * 1000 - s.messageTime < 30_000 {
+                    v.notifyUntil = s.messageTime + v.bubbleLifeMs + 200
+                    v.exciteUntil = now * 1000 + 2200
+                    v.revealVelocity = max(v.revealVelocity, 0.30)  // extra spring kick: pop!
+                    if self.panel.prefs.chirp { NSSound(named: "Pop")?.play() }
+                    if !self.panel.isVisible { self.panel.orderFrontRegardless() }
+                }
             }
             self.updateStatusIcon()
         }
         pollTimer.fire()
+
+        // keep the bat on its remembered display when monitors come and go
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.panel.layout()
+        }
     }
 
     func setupStatusItem() {
@@ -542,32 +602,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = menuIconAwake
         statusItem.button?.imagePosition = .imageOnly
 
-        let menu = NSMenu()
-        let infoItem = NSMenuItem(title: "No Claude sessions", action: nil, keyEquivalent: "")
+        // rebuilt on every open (menuNeedsUpdate), so checkmarks and the
+        // message history are always current — same builder as the right-click menu
+        statusMenu.delegate = self
+        statusItem.menu = statusMenu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        menu.removeAllItems()
+        populate(menu, forBuddy: false)
+    }
+
+    func populate(_ menu: NSMenu, forBuddy: Bool) {
+        let awake = panel.buddyView.awake
+
+        let infoItem = NSMenuItem(title: infoLine(), action: nil, keyEquivalent: "")
         infoItem.isEnabled = false
-        statusInfoItem = infoItem
         menu.addItem(infoItem)
         menu.addItem(NSMenuItem.separator())
+
         let toggleItem = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleAwake), keyEquivalent: "")
-        toggleItem.target = self
-        statusToggleItem = toggleItem
+        toggleItem.state = awake ? .on : .off
         menu.addItem(toggleItem)
         let displayItem = NSMenuItem(title: "Keep Display On", action: #selector(toggleKeepDisplayOn), keyEquivalent: "")
-        displayItem.target = self
-        statusDisplayItem = displayItem
+        displayItem.state = panel.prefs.keepDisplayOn ? .on : .off
         menu.addItem(displayItem)
+
+        // sleep-safety timer: hard cap on how long keep-awake can run
+        let timerItem = NSMenuItem(title: "Sleep-Safety Timer", action: nil, keyEquivalent: "")
+        let timerMenu = NSMenu()
+        for (label, hours) in [("Off", 0.0), ("After 2 hours", 2.0), ("After 4 hours", 4.0), ("After 8 hours", 8.0)] {
+            let it = NSMenuItem(title: label, action: #selector(setSafetyTimer(_:)), keyEquivalent: "")
+            it.representedObject = hours
+            it.state = panel.prefs.maxAwakeHours == hours ? .on : .off
+            it.target = self
+            timerMenu.addItem(it)
+        }
+        timerItem.submenu = timerMenu
+        menu.addItem(timerItem)
+
+        let chirpItem = NSMenuItem(title: "Chirp on Notifications", action: #selector(toggleChirp), keyEquivalent: "")
+        chirpItem.state = panel.prefs.chirp ? .on : .off
+        menu.addItem(chirpItem)
+
+        // recent Claude messages, newest first, so a missed bubble isn't gone forever
+        let histItem = NSMenuItem(title: "Recent Messages", action: nil, keyEquivalent: "")
+        let histMenu = NSMenu()
+        if history.isEmpty {
+            let none = NSMenuItem(title: "No messages yet", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            histMenu.addItem(none)
+        } else {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "HH:mm"
+            for entry in history.reversed() {
+                let when = fmt.string(from: Date(timeIntervalSince1970: entry.time / 1000))
+                let text = entry.text.count > 60 ? String(entry.text.prefix(57)) + "…" : entry.text
+                let it = NSMenuItem(title: "\(when)   \(text)", action: nil, keyEquivalent: "")
+                it.isEnabled = false
+                histMenu.addItem(it)
+            }
+        }
+        histItem.submenu = histMenu
+        menu.addItem(histItem)
         menu.addItem(NSMenuItem.separator())
-        let showHideItem = NSMenuItem(title: "Show/Hide Buddy", action: #selector(toggleShowHide), keyEquivalent: "")
-        showHideItem.target = self
-        menu.addItem(showHideItem)
+
+        if forBuddy {
+            menu.addItem(withTitle: "Hide Wigbat", action: #selector(hideBuddy), keyEquivalent: "")
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(withTitle: "Bigger", action: #selector(biggerBuddy), keyEquivalent: "")
+            menu.addItem(withTitle: "Smaller", action: #selector(smallerBuddy), keyEquivalent: "")
+            menu.addItem(withTitle: "Rotate Left", action: #selector(rotateLeft), keyEquivalent: "")
+            menu.addItem(withTitle: "Rotate Right", action: #selector(rotateRight), keyEquivalent: "")
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(withTitle: "Reset Position", action: #selector(resetPosition), keyEquivalent: "")
+        } else {
+            menu.addItem(withTitle: "Show/Hide Buddy", action: #selector(toggleShowHide), keyEquivalent: "")
+        }
         menu.addItem(NSMenuItem.separator())
-        let helpItem = NSMenuItem(title: "Help", action: #selector(showHelp), keyEquivalent: "")
-        helpItem.target = self
-        menu.addItem(helpItem)
-        let quitItem = NSMenuItem(title: "Quit Wigbat", action: #selector(quitApp), keyEquivalent: "")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        statusItem.menu = menu
+        menu.addItem(withTitle: "Help", action: #selector(showHelp), keyEquivalent: "")
+        menu.addItem(withTitle: "Quit Wigbat", action: #selector(quitApp), keyEquivalent: "")
+        for item in menu.items where item.target == nil && item.action != nil { item.target = self }
     }
 
     func infoLine() -> String {
@@ -578,15 +694,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let mins = Int(Date().timeIntervalSince1970 - awakeSince) / 60
             let dur = mins >= 60 ? "\(mins / 60)h \(mins % 60)m" : "\(mins)m"
             line += " · awake \(dur)"
+            let maxH = panel.prefs.maxAwakeHours
+            if maxH > 0 {
+                let left = Int(maxH * 60) - mins
+                if left > 0 {
+                    line += " · auto-sleep in \(left >= 60 ? "\(left / 60)h \(left % 60)m" : "\(left)m")"
+                }
+            }
         }
         return line
     }
 
     func updateStatusIcon() {
         statusItem.button?.image = panel.buddyView.awake ? menuIconAwake : menuIconAsleep
-        statusToggleItem?.state = panel.buddyView.awake ? .on : .off
-        statusDisplayItem?.state = panel.prefs.keepDisplayOn ? .on : .off
-        statusInfoItem?.title = infoLine()
+    }
+
+    @objc func setSafetyTimer(_ sender: NSMenuItem) {
+        panel.prefs.maxAwakeHours = (sender.representedObject as? Double) ?? 0
+        panel.prefs.save()
+    }
+
+    @objc func toggleChirp() {
+        panel.prefs.chirp.toggle()
+        panel.prefs.save()
+        if panel.prefs.chirp { NSSound(named: "Pop")?.play() }  // audible confirmation
     }
 
     @objc func toggleAwake() {
@@ -629,9 +760,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Wigbat keeps your Mac awake while Claude Code sessions are running, and lets it sleep normally when you're done.
 
         • Left-click the bat: toggle keep-awake manually
-        • Drag the bat: move it anywhere on screen, free-hand
-        • Right-click the bat: menu (hide, resize, rotate, reset position, help, quit)
+        • Drag the bat: move it anywhere, on any display
+        • Right-click the bat: menu (timer, chirp, history, resize, rotate, quit…)
         • Hover: reveal it fully; move away: it tucks back in
+        • Speech bubble: click it to dismiss
+        • Sleep-Safety Timer: auto-stop keep-awake after 2/4/8 hours
+        • Recent Messages: the last few Claude notifications, in both menus
         • Menu bar icon: same controls, always available
         """
         alert.runModal()
