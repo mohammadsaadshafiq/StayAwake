@@ -7,13 +7,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETTINGS="$HOME/.claude/settings.json"
 PLIST="$HOME/Library/LaunchAgents/com.wigbat.buddy.plist"
 
-echo "==> Compiling Wigbat"
-if ! command -v swiftc >/dev/null 2>&1; then
-  echo "swiftc not found. Install Xcode Command Line Tools first:"
-  echo "  xcode-select --install"
-  exit 1
-fi
-(cd "$DIR/swift" && swiftc -O BuddyApp.swift -o buddy)
+echo "==> Building Wigbat.app"
+# Compiles the binary and installs Wigbat.app (Spotlight/Finder/Dock launchable,
+# menu-bar-only while running). Prints the installed bundle path on its last line.
+APP="$("$DIR/bin/make-app.sh")"
+echo "    installed to $APP"
 
 echo "==> Making scripts executable"
 chmod +x "$DIR"/bin/*
@@ -29,7 +27,7 @@ cat > "$PLIST" <<PLIST_EOF
     <string>com.wigbat.buddy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$DIR/swift/buddy</string>
+        <string>$APP/Contents/MacOS/buddy</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

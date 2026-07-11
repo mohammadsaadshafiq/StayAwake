@@ -44,6 +44,26 @@ awake while Claude Code is working, and lets it sleep the moment you're done
   Hide, Bigger/Smaller, Rotate Left/Right, Reset Position, Help, Quit
 - **Menu bar icon** — same toggles plus Show/Hide, Help, Quit
 
+## Opening & relaunching it
+
+You normally never launch Wigbat by hand — `install.sh` starts it and a
+LaunchAgent auto-launches it at every login (and auto-restarts it if it
+crashes). While running it shows up **only** as the menu-bar icon (🦇/💤) and
+the floating bat — there's deliberately no Dock icon, since it's an accessory
+app.
+
+The one time you need to reopen it is after you've chosen **Quit** from its
+menu — a deliberate Quit stays quit until you relaunch it. Because it's
+installed as `/Applications/Wigbat.app`, you can reopen it however you like:
+
+- **Spotlight** — ⌘-Space, type "Wigbat", hit Enter
+- **Finder** — double-click `Wigbat.app` in `/Applications`
+- **Dock** — drag `Wigbat.app` into the Dock once for a permanent launcher
+- **Terminal** — `open -a Wigbat`
+
+Only one bat ever runs at a time — launching it again while it's already up
+just does nothing (a single-instance lock guards against duplicates).
+
 ## How it's built
 
 - `bin/stayawake`, `bin/killawake` — the actual caffeinate wrapper scripts,
@@ -60,12 +80,21 @@ awake while Claude Code is working, and lets it sleep the moment you're done
   `.statusBar`-level `NSPanel` with `.fullScreenAuxiliary` collection
   behavior. Also self-heals: its 1s poll loop checks real `claude`
   processes via `pgrep` and forces sleep if a session was force-killed
-  without `SessionEnd` ever firing.
+  without `SessionEnd` ever firing. Holds an exclusive `flock` on
+  `state/buddy.lock` at startup so only one instance can ever run,
+  regardless of how it was launched.
+- `bin/make-app.sh` — compiles the binary and packages it as
+  `/Applications/Wigbat.app` (an `.icns` icon generated from the artwork, plus
+  an `Info.plist` with `LSUIElement` so it stays menu-bar-only while running).
+  This is what makes the bat launchable from Spotlight/Finder/Dock. Assets and
+  state are still read from `~/claude-awake-buddy`, so the bundle only carries
+  the binary + icon.
 - `assets/` — the bat artwork (branch, awake body, asleep body, menu bar
   icons), all as transparent PNGs.
 - `~/Library/LaunchAgents/com.wigbat.buddy.plist` — keeps the bat app
-  running: auto-launches at login, auto-restarts if it ever crashes, but
-  a deliberate Quit stays quit.
+  running: points at `/Applications/Wigbat.app/Contents/MacOS/buddy`,
+  auto-launches at login, auto-restarts if it ever crashes, but a deliberate
+  Quit stays quit (relaunch it from Spotlight/Finder — see above).
 
 ## Installing on another Mac
 

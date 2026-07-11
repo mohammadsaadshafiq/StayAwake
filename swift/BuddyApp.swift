@@ -642,6 +642,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// Single-instance guard — hold an exclusive lock so only one bat ever runs,
+// no matter how it was launched (LaunchAgent, Spotlight, Finder, or terminal).
+// The FD is intentionally leaked for the process lifetime so the lock is held.
+try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+let lockFD = open("\(stateDir)/buddy.lock", O_CREAT | O_RDWR, 0o644)
+if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+    FileHandle.standardError.write(Data("Wigbat is already running — not starting a second instance.\n".utf8))
+    exit(0)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
