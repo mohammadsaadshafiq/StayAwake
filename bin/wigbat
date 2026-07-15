@@ -1,0 +1,117 @@
+#!/bin/bash
+# wigbat — universal bridge to the Wigbat buddy.
+#
+# Lets ANY app or script keep the Mac awake and pop a speech bubble, with or
+# without Claude Code. All state is plain files under ~/claude-awake-buddy/state
+# that the running Wigbat app watches once a second.
+#
+#   wigbat notify "message"     show a speech bubble (chirps too)
+#   wigbat on                   keep the Mac awake until you say otherwise
+#   wigbat off                  let the Mac sleep (overrides other sources)
+#   wigbat auto                 drop the manual override, follow the sources
+#   wigbat run -- <command…>    keep awake while the command runs, then notify
+#
+set -uo pipefail
+
+DIR="$HOME/claude-awake-buddy"
+STATE="$DIR/state"
+BIN="$DIR/bin"
+mkdir -p "$STATE"
+
+usage() {
+  cat <<'EOF'
+wigbat — universal bridge to the Wigbat buddy
+
+  wigbat notify "message"     show a speech bubble (chirps too)
+  wigbat on                   keep the Mac awake until you say otherwise
+  wigbat off                  let the Mac sleep (overrides other sources)
+  wigbat auto                 drop the manual override, follow the sources
+  wigbat run -- <command…>    keep awake while the command runs, then notify
+EOF
+}
+
+# write {message,time} the same shape the Notification hook uses
+write_message() {
+  local msg="$1" ts
+  ts="$(date +%s)000"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --arg m "$msg" --argjson t "$ts" '{message:$m, time:$t}' > "$STATE/message.json"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; open(sys.argv[3],"w").write(json.dumps({"message":sys.argv[1],"time":int(sys.argv[2])}))' \
+      "$msg" "$ts" "$STATE/message.json"
+  else
+    # last resort: escape quotes/backslashes minimally
+    local esc=${msg//\\/\\\\}; esc=${esc//\"/\\\"}
+    printf '{"message":"%s","time":%s}' "$esc" "$ts" > "$STATE/message.json"
+  fi
+}
+
+# ref-counted keep-awake for `run`, guarded by a directory lock (like the
+# Claude session counter) so concurrent `wigbat run`s compose correctly
+run_count_adjust() {
+  local delta="$1" lock="$STATE/.run.lock" count i=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    sleep 0.05; i=$((i + 1)); [ "$i" -gt 100 ] && break
+  done
+  trap 'rmdir "$lock" 2>/dev/null' RETURN
+  count=$(cat "$STATE/run-count" 2>/dev/null); count=${count:-0}
+  count=$((count + delta)); [ "$count" -lt 0 ] && count=0
+  echo "$count" > "$STATE/run-count"
+  echo "$count"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+
+case "$cmd" in
+  notify)
+    msg="$*"
+    [ -z "$msg" ] && { echo "usage: wigbat notify \"message\"" >&2; exit 1; }
+    write_message "$msg"
+    ;;
+
+  on)
+    echo on > "$STATE/override"
+    "$BIN/stayawake" >/dev/null 2>&1 || true
+    echo "☕ Wigbat: keeping the Mac awake (until 'wigbat off' or 'wigbat auto')."
+    ;;
+
+  off)
+    echo off > "$STATE/override"
+    "$BIN/killawake" >/dev/null 2>&1 || true
+    echo "😴 Wigbat: letting the Mac sleep."
+    ;;
+
+  auto)
+    rm -f "$STATE/override"
+    echo "🔄 Wigbat: following the sources (Claude, watched apps, running commands)."
+    ;;
+
+  run)
+    [ "${1:-}" = "--" ] && shift
+    [ $# -eq 0 ] && { echo "usage: wigbat run -- <command…>" >&2; exit 1; }
+    label="$*"; [ "${#label}" -gt 40 ] && label="${label:0:39}…"
+    run_count_adjust 1 >/dev/null
+    "$BIN/stayawake" >/dev/null 2>&1 || true
+    "$@"; code=$?
+    remaining="$(run_count_adjust -1)"
+    if [ "$code" -eq 0 ]; then
+      write_message "✅ Done: $label"
+    else
+      write_message "⚠️ \"$label\" exited with code $code"
+    fi
+    # if nothing else is holding it awake, the app's reconciler will sleep soon;
+    # nudge it immediately when we were the last command running
+    [ "$remaining" -eq 0 ] || true
+    exit "$code"
+    ;;
+
+  ""|-h|--help|help)
+    usage
+    ;;
+
+  *)
+    echo "wigbat: unknown command '$cmd'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

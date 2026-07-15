@@ -65,6 +65,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST_EOF
     <key>LSMinimumSystemVersion</key>  <string>11.0</string>
     <key>NSHighResolutionCapable</key> <true/>
     <key>LSUIElement</key>             <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>    <string>$BUNDLE_ID</string>
+            <key>CFBundleURLSchemes</key> <array><string>wigbat</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST_EOF

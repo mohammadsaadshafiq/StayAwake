@@ -1,0 +1,22 @@
+{
+  "id": "cat",
+  "displayName": "Cat",
+  "style": "sitting",
+  "baseWidth": 130,
+  "baseHeight": 130,
+  "bobAmplitude": 2.0,
+  "swayDegrees": 1.2,
+  "altEverySec": 80,
+  "altForSec": 5,
+  "poses": {
+    "asleep": "asleep.png",
+    "awake": "awake.png",
+    "working": "working.png",
+    "awakeAlt": "awake-alt.png",
+    "leaving": "leaving.png"
+  },
+  "menuIcons": {
+    "awake": "menu-awake.png",
+    "asleep": "menu-asleep.png"
+  }
+}
